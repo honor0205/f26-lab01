@@ -12,10 +12,12 @@ import org.junit.jupiter.api.Test;
 class CancelBookingTest {
 
     private final Room roomA = new Room("A", "Alpha", 10);
+    private final Room roomB = new Room("B", "Beta", 10);
     private final User alice = new User("u1", "Alice");
     private final User bob = new User("u2", "Bob");
     private final User carol = new User("u3", "Carol");
     private final User dave = new User("u4", "Dave");
+    private final User erin = new User("u5", "Erin");
 
     private BookingService newService() {
         return new BookingService(new InMemoryBookingStore());
@@ -101,5 +103,133 @@ class CancelBookingTest {
         assertEquals(bob.id(), svc.listBookings(roomA).get(0).user().id());
         assertEquals(1, store.waitlistForRoom(roomA).size());
         assertEquals(carol.id(), store.waitlistForRoom(roomA).get(0).user().id());
+    }
+
+    /**
+     * S4a: a skipped waiter is considered free even when its interval only
+     * touches a remaining booking (half-open boundary: touching does not overlap).
+     */
+    @Test
+    void cancelPromotesWaiterWhoseIntervalTouchesRemainingBooking() {
+        InMemoryBookingStore store = new InMemoryBookingStore();
+        BookingService svc = new BookingService(store);
+        svc.book(roomA, alice, new TimeInterval(600, 660));
+        svc.book(roomA, carol, new TimeInterval(660, 720));
+        svc.book(roomA, bob, new TimeInterval(640, 700)); // waitlisted: overlaps both bookings
+        svc.book(roomA, dave, new TimeInterval(600, 660)); // waitlisted: overlaps alice only
+        String aliceBookingId = svc.listBookings(roomA).get(0).id();
+
+        svc.cancelBooking(aliceBookingId);
+
+        assertEquals(2, svc.listBookings(roomA).size());
+        Booking carolBooking = svc.listBookings(roomA).get(0);
+        Booking promoted = svc.listBookings(roomA).get(1);
+        assertEquals(carol.id(), carolBooking.user().id());
+        assertEquals(dave.id(), promoted.user().id());
+        assertEquals(new TimeInterval(600, 660), promoted.interval());
+        // Dave's interval ends exactly where Carol's begins: touching, not overlapping.
+        assertEquals(carolBooking.interval().start(), promoted.interval().end());
+        assertEquals(1, store.waitlistForRoom(roomA).size());
+        assertEquals(bob.id(), store.waitlistForRoom(roomA).get(0).user().id());
+    }
+
+    /** S4b: several blocked waiters are skipped before the first one that fits. */
+    @Test
+    void cancelSkipsSeveralBlockedWaiters() {
+        InMemoryBookingStore store = new InMemoryBookingStore();
+        BookingService svc = new BookingService(store);
+        svc.book(roomA, alice, new TimeInterval(600, 660));
+        svc.book(roomA, carol, new TimeInterval(700, 760));
+        svc.book(roomA, bob, new TimeInterval(640, 720)); // waitlisted: overlaps both bookings
+        svc.book(roomA, dave, new TimeInterval(600, 760)); // waitlisted: overlaps both bookings
+        svc.book(roomA, erin, new TimeInterval(600, 640)); // waitlisted: overlaps alice only
+        String aliceBookingId = svc.listBookings(roomA).get(0).id();
+
+        svc.cancelBooking(aliceBookingId);
+
+        assertEquals(2, svc.listBookings(roomA).size());
+        assertEquals(carol.id(), svc.listBookings(roomA).get(0).user().id());
+        assertEquals(erin.id(), svc.listBookings(roomA).get(1).user().id());
+        assertEquals(2, store.waitlistForRoom(roomA).size());
+        assertEquals(bob.id(), store.waitlistForRoom(roomA).get(0).user().id());
+        assertEquals(dave.id(), store.waitlistForRoom(roomA).get(1).user().id());
+    }
+
+    /**
+     * S5a: two waiters whose intervals overlap each other both fit after the
+     * cancel, yet only the earliest is promoted; the other stays on the waitlist.
+     */
+    @Test
+    void cancelPromotesOnlyOneOfOverlappingWaiters() {
+        InMemoryBookingStore store = new InMemoryBookingStore();
+        BookingService svc = new BookingService(store);
+        svc.book(roomA, alice, new TimeInterval(600, 720));
+        svc.book(roomA, bob, new TimeInterval(600, 660)); // waitlisted
+        svc.book(roomA, carol, new TimeInterval(600, 640)); // waitlisted, overlaps bob
+        String aliceBookingId = svc.listBookings(roomA).get(0).id();
+
+        svc.cancelBooking(aliceBookingId);
+
+        assertEquals(1, svc.listBookings(roomA).size());
+        assertEquals(bob.id(), svc.listBookings(roomA).get(0).user().id());
+        assertEquals(1, store.waitlistForRoom(roomA).size());
+        assertEquals(carol.id(), store.waitlistForRoom(roomA).get(0).user().id());
+    }
+
+    /** S6: when every waiter is still blocked by a remaining booking, promote no one. */
+    @Test
+    void cancelPromotesNoOneWhenNoWaiterFits() {
+        InMemoryBookingStore store = new InMemoryBookingStore();
+        BookingService svc = new BookingService(store);
+        svc.book(roomA, alice, new TimeInterval(600, 660));
+        svc.book(roomA, carol, new TimeInterval(700, 760));
+        svc.book(roomA, bob, new TimeInterval(600, 760)); // waitlisted: overlaps both bookings
+        svc.book(roomA, dave, new TimeInterval(640, 720)); // waitlisted: overlaps both bookings
+        String aliceBookingId = svc.listBookings(roomA).get(0).id();
+
+        svc.cancelBooking(aliceBookingId);
+
+        assertEquals(1, svc.listBookings(roomA).size());
+        assertEquals(carol.id(), svc.listBookings(roomA).get(0).user().id());
+        assertEquals(2, store.waitlistForRoom(roomA).size());
+        assertEquals(bob.id(), store.waitlistForRoom(roomA).get(0).user().id());
+        assertEquals(dave.id(), store.waitlistForRoom(roomA).get(1).user().id());
+    }
+
+    /** S6a: a room with no waiters promotes nobody when a booking is cancelled. */
+    @Test
+    void cancelWithEmptyWaitlistPromotesNoOne() {
+        InMemoryBookingStore store = new InMemoryBookingStore();
+        BookingService svc = new BookingService(store);
+        svc.book(roomA, alice, new TimeInterval(600, 660));
+        String aliceBookingId = svc.listBookings(roomA).get(0).id();
+
+        svc.cancelBooking(aliceBookingId);
+
+        assertEquals(0, svc.listBookings(roomA).size());
+        assertEquals(0, store.waitlistForRoom(roomA).size());
+    }
+
+    /** S6b: promotion only touches the freed room's waitlist, never another room's. */
+    @Test
+    void cancelPromotesOnlyWaitersOfFreedRoom() {
+        InMemoryBookingStore store = new InMemoryBookingStore();
+        BookingService svc = new BookingService(store);
+        svc.book(roomA, alice, new TimeInterval(600, 660));
+        svc.book(roomA, bob, new TimeInterval(600, 660)); // waitlisted on A
+        svc.book(roomB, carol, new TimeInterval(600, 660));
+        svc.book(roomB, dave, new TimeInterval(600, 660)); // waitlisted on B
+        String aliceBookingId = svc.listBookings(roomA).get(0).id();
+
+        svc.cancelBooking(aliceBookingId);
+
+        assertEquals(1, svc.listBookings(roomA).size());
+        assertEquals(bob.id(), svc.listBookings(roomA).get(0).user().id());
+        assertEquals(0, store.waitlistForRoom(roomA).size());
+        // Room B is untouched: carol keeps the booking, dave stays on the waitlist.
+        assertEquals(1, svc.listBookings(roomB).size());
+        assertEquals(carol.id(), svc.listBookings(roomB).get(0).user().id());
+        assertEquals(1, store.waitlistForRoom(roomB).size());
+        assertEquals(dave.id(), store.waitlistForRoom(roomB).get(0).user().id());
     }
 }
